@@ -6,27 +6,42 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/gobwas/glob"
 	"github.com/mitchellh/go-homedir"
 )
 
-// SSHHost defines a single host entry in a ssh config
+// SSHHost defines a single host entry in an ssh config
 type SSHHost struct {
 	Host              []string
 	HostName          string
 	User              string
 	Port              int
+	IdentityFile      string
 	ProxyCommand      string
 	ProxyJump         []string
-	HostKeyAlgorithms string
-	IdentityFile      string
 	LocalForwards     []Forward
 	RemoteForwards    []Forward
 	DynamicForwards   []DynamicForward
+	HostKeyAlgorithms []string
 	Ciphers           []string
 	MACs              []string
+
+	hostMatcher      []glob.Glob
+	isGlobalWildcard bool
+}
+
+// Match returns true if the host matches to SSHHost
+func (h *SSHHost) Match(host string) bool {
+	for _, g := range h.hostMatcher {
+		if g != nil && g.Match(host) {
+			return true
+		}
+	}
+	return false
 }
 
 // Forward defines a single port forward entry
@@ -43,7 +58,7 @@ func NewForward(f string) (Forward, error) {
 	m := r.FindStringSubmatch(f)
 
 	if len(m) < 6 {
-		return Forward{}, fmt.Errorf("Invalid forward: %#v", f)
+		return Forward{}, fmt.Errorf("invalid forward: %#v", f)
 	}
 
 	InPort, err := strconv.Atoi(m[3])
@@ -76,7 +91,7 @@ func NewDynamicForward(f string) (DynamicForward, error) {
 	m := r.FindStringSubmatch(f)
 
 	if len(m) < 4 {
-		return DynamicForward{}, fmt.Errorf("Invalid dynamic forward: %#v", f)
+		return DynamicForward{}, fmt.Errorf("invalid dynamic forward: %#v", f)
 	}
 
 	InPort, err := strconv.Atoi(m[3])
@@ -90,7 +105,7 @@ func NewDynamicForward(f string) (DynamicForward, error) {
 	}, nil
 }
 
-// MustParse must parse the SSH config given by path or it will panic
+// MustParse must parse the SSH config given by path, or it will panic
 func MustParse(path string) []*SSHHost {
 	config, err := Parse(path)
 	if err != nil {
@@ -99,7 +114,7 @@ func MustParse(path string) []*SSHHost {
 	return config
 }
 
-// MustParseSSHConfig must parse the SSH config given by path or it will panic
+// MustParseSSHConfig must parse the SSH config given by path, or it will panic
 // Deprecated: Use MustParse instead.
 func MustParseSSHConfig(path string) []*SSHHost {
 	return MustParse(path)
@@ -111,7 +126,7 @@ func ParseSSHConfig(path string) ([]*SSHHost, error) {
 	return Parse(path)
 }
 
-// Parse parses a SSH config given by path.
+// Parse parses an SSH config given by path.
 func Parse(path string) ([]*SSHHost, error) {
 	// read config file
 	content, err := os.ReadFile(path)
@@ -138,7 +153,7 @@ func parse(input string, path string) ([]*SSHHost, error) {
 	var sshConfigs []*SSHHost
 	var next item
 	var sshHost *SSHHost
-	var onlyIncludes bool = !strings.Contains(input, "Host ") && strings.Contains(input, "Include ")
+	var onlyIncludes = !strings.Contains(input, "Host ") && strings.Contains(input, "Include ")
 
 	lexer := lex(input)
 Loop:
@@ -166,9 +181,17 @@ Loop:
 				sshConfigs = append(sshConfigs, sshHost)
 			}
 
-			sshHost = &SSHHost{Host: []string{}, Port: 22}
+			sshHost = new(SSHHost)
 		case itemHostValue:
 			sshHost.Host = strings.Split(token.val, " ")
+			sshHost.isGlobalWildcard = len(sshHost.Host) == 1 && sshHost.Host[0] == "*"
+			if !sshHost.isGlobalWildcard {
+				globs, err := compileHostsToGlob(sshHost.Host)
+				if err != nil {
+					return nil, err
+				}
+				sshHost.hostMatcher = globs
+			}
 		case itemHostName:
 			next = lexer.nextItem()
 			if next.typ != itemValue {
@@ -208,7 +231,7 @@ Loop:
 			if next.typ != itemValue {
 				return nil, fmt.Errorf(next.val)
 			}
-			sshHost.HostKeyAlgorithms = next.val
+			sshHost.HostKeyAlgorithms = strings.Split(next.val, ",")
 		case itemIdentityFile:
 			next = lexer.nextItem()
 			if next.typ != itemValue {
@@ -287,7 +310,7 @@ Loop:
 			// continue onwards
 		}
 	}
-	return sshConfigs, nil
+	return mergeGlobalWildcard(sshConfigs), nil
 }
 
 func parseIncludePath(currentPath string, includePath string) (string, error) {
@@ -303,4 +326,66 @@ func parseIncludePath(currentPath string, includePath string) (string, error) {
 	}
 
 	return includePath, nil
+}
+
+func mergeGlobalWildcard(sshConfigs []*SSHHost) []*SSHHost {
+	gi := slices.IndexFunc(sshConfigs, func(host *SSHHost) bool {
+		if host.isGlobalWildcard {
+			return true
+		}
+		return false
+	})
+	if gi == -1 {
+		return sshConfigs
+	}
+
+	global := sshConfigs[gi]
+	for _, sshConfig := range sshConfigs {
+		if sshConfig.User == "" {
+			sshConfig.User = global.User
+		}
+
+		if sshConfig.Port == 0 {
+			sshConfig.Port = global.Port
+		}
+
+		if sshConfig.IdentityFile == "" {
+			sshConfig.IdentityFile = global.IdentityFile
+		}
+
+		if sshConfig.ProxyCommand == "" {
+			sshConfig.ProxyCommand = global.ProxyCommand
+		}
+
+		if len(sshConfig.ProxyJump) == 0 {
+			sshConfig.ProxyJump = global.ProxyJump
+		}
+
+		if len(sshConfig.HostKeyAlgorithms) == 0 {
+			sshConfig.HostKeyAlgorithms = global.HostKeyAlgorithms
+		}
+
+		if len(sshConfig.Ciphers) == 0 {
+			sshConfig.Ciphers = global.Ciphers
+		}
+
+		if len(sshConfig.MACs) == 0 {
+			sshConfig.MACs = global.MACs
+		}
+	}
+
+	return slices.Delete(sshConfigs, gi, gi+1)
+}
+
+func compileHostsToGlob(hosts []string) ([]glob.Glob, error) {
+	globs := make([]glob.Glob, 0, len(hosts))
+	for _, pattern := range hosts {
+		compiled, err := glob.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile glob pattern: %s, error: %w", pattern, err)
+		}
+		globs = append(globs, compiled)
+	}
+
+	return globs, nil
 }

@@ -61,6 +61,106 @@ Host face
 	}
 }
 
+func TestGlobalWildcard(t *testing.T) {
+	config := `
+Host *
+  User admin
+  Port 69
+  KexAlgorithms diffie-hellman-group1-sha1,diffie-hellman-group-exchange-sha256
+
+Host google
+  HostName google.se
+  User goog
+  Port 2222
+  ProxyCommand ssh -q pluto nc saturn 22
+  HostKeyAlgorithms ssh-dss
+  IdentityOnly yes
+  IdentityFile ~/.ssh/company
+
+Host face
+  HostName facebook.com
+  User mark
+  ProxyJump google,other
+  Port 22
+
+Host other
+  HostName example.org
+  HostKeyAlgorithms ssh-rsa,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256
+  Ciphers 3des-cbc,blowfish-cbc,cast128-cbc
+  MACs hmac-sha1,hmac-sha1-96`
+
+	expected := []*SSHHost{
+		{
+			Host:              []string{"google"},
+			HostName:          "google.se",
+			User:              "goog",
+			Port:              2222,
+			IdentityFile:      "~/.ssh/company",
+			ProxyCommand:      "ssh -q pluto nc saturn 22",
+			HostKeyAlgorithms: []string{"ssh-dss"},
+		},
+		{
+			Host:         []string{"face"},
+			User:         "mark",
+			Port:         22,
+			HostName:     "facebook.com",
+			ProxyCommand: "",
+			ProxyJump:    []string{"google", "other"},
+			IdentityFile: "",
+		},
+		{
+			Host:              []string{"other"},
+			User:              "admin",
+			Port:              69,
+			HostName:          "example.org",
+			HostKeyAlgorithms: []string{"ssh-rsa", "ecdsa-sha2-nistp521", "rsa-sha2-512", "rsa-sha2-256"},
+			Ciphers:           []string{"3des-cbc", "blowfish-cbc", "cast128-cbc"},
+			MACs:              []string{"hmac-sha1", "hmac-sha1-96"},
+		},
+	}
+	actual, err := parse(config, "~/.ssh/config")
+	if err != nil {
+		t.Errorf("unexpected error parsing config: %s", err.Error())
+	}
+	for _, h := range actual {
+		fmt.Printf("actual: %+v\n", h)
+	}
+
+	compare(t, expected, actual)
+}
+
+func TestMatch(t *testing.T) {
+	config := `Host 10.1*
+  User admin
+  Port 22`
+
+	hosts, err := parse(config, "~/.ssh/config")
+	if err != nil {
+		t.Errorf("unable to parse config: %s", err.Error())
+	}
+
+	if len(hosts) != 1 {
+		t.Errorf("got %d hosts, want 1", len(hosts))
+	}
+
+	tests := []struct {
+		host        string
+		shouldMatch bool
+	}{
+		{"10.10.10.1", true},
+		{"10.10.0.1", true},
+		{"10.11.0.1", true},
+		{"10.21.10.1", false},
+		{"192.168.10.1", false},
+	}
+
+	for _, test := range tests {
+		if hosts[0].Match(test.host) != test.shouldMatch {
+			t.Errorf("host %s should match %t", test.host, test.shouldMatch)
+		}
+	}
+}
+
 func TestTrailingComment(t *testing.T) {
 	config := "Host *\n#comment"
 	_, err := parse(config, "~/.ssh/config")
@@ -133,19 +233,18 @@ Host other
 			HostName:          "google.se",
 			User:              "goog",
 			Port:              2222,
-			HostKeyAlgorithms: "ssh-dss",
+			HostKeyAlgorithms: []string{"ssh-dss"},
 			ProxyCommand:      "ssh -q pluto nc saturn 22",
 			IdentityFile:      "~/.ssh/company",
 		},
 		{
-			Host:              []string{"face"},
-			User:              "mark",
-			Port:              22,
-			HostName:          "facebook.com",
-			HostKeyAlgorithms: "",
-			ProxyCommand:      "",
-			ProxyJump:         []string{"google", "other"},
-			IdentityFile:      "",
+			Host:         []string{"face"},
+			User:         "mark",
+			Port:         22,
+			HostName:     "facebook.com",
+			ProxyCommand: "",
+			ProxyJump:    []string{"google", "other"},
+			IdentityFile: "",
 		},
 		{
 			Host:     []string{"other"},
@@ -316,7 +415,7 @@ Host face
 			HostName:          "google.se",
 			User:              "goog",
 			Port:              2222,
-			HostKeyAlgorithms: "ssh-dss",
+			HostKeyAlgorithms: []string{"ssh-dss"},
 			ProxyCommand:      "ssh -q pluto nc saturn 22",
 			IdentityFile:      "~/.ssh/company",
 			LocalForwards: []Forward{
@@ -329,13 +428,12 @@ Host face
 			},
 		},
 		{
-			Host:              []string{"face"},
-			User:              "mark",
-			Port:              22,
-			HostName:          "facebook.com",
-			HostKeyAlgorithms: "",
-			ProxyCommand:      "",
-			IdentityFile:      "",
+			Host:         []string{"face"},
+			User:         "mark",
+			Port:         22,
+			HostName:     "facebook.com",
+			ProxyCommand: "",
+			IdentityFile: "",
 			LocalForwards: []Forward{
 				{
 					InHost:  "",
@@ -369,11 +467,11 @@ func TestLocalForwardInvalid1(t *testing.T) {
 
 	var expected []*SSHHost
 
-	expectedErr := "Invalid forward: \"2222 totalylegitserver 22\""
+	expectedErr := "invalid forward: \"2222 totalylegitserver 22\""
 
 	actual, err := parse(config, "~/.ssh/config")
 	if err == nil || err.Error() != expectedErr {
-		t.Errorf("Did not get expected error: %#v, got %#v", expectedErr, err.Error())
+		t.Errorf("Did not get expected error: %#v, got %#v", expectedErr, err)
 	}
 
 	compare(t, expected, actual)
@@ -442,7 +540,7 @@ Host face
 			HostName:          "google.se",
 			User:              "goog",
 			Port:              2222,
-			HostKeyAlgorithms: "ssh-dss",
+			HostKeyAlgorithms: []string{"ssh-dss"},
 			ProxyCommand:      "ssh -q pluto nc saturn 22",
 			IdentityFile:      "~/.ssh/company",
 			RemoteForwards: []Forward{
@@ -455,13 +553,12 @@ Host face
 			},
 		},
 		{
-			Host:              []string{"face"},
-			User:              "mark",
-			Port:              22,
-			HostName:          "facebook.com",
-			HostKeyAlgorithms: "",
-			ProxyCommand:      "",
-			IdentityFile:      "",
+			Host:         []string{"face"},
+			User:         "mark",
+			Port:         22,
+			HostName:     "facebook.com",
+			ProxyCommand: "",
+			IdentityFile: "",
 			RemoteForwards: []Forward{
 				{
 					InHost:  "",
@@ -495,7 +592,7 @@ func TestRemoteForwardInvalid1(t *testing.T) {
 
 	var expected []*SSHHost
 
-	expectedErr := "Invalid forward: \"abc totalylegitserver:22\""
+	expectedErr := "invalid forward: \"abc totalylegitserver:22\""
 
 	actual, err := parse(config, "~/.ssh/config")
 	if err == nil || err.Error() != expectedErr {
@@ -511,7 +608,7 @@ func TestDynamicForward(t *testing.T) {
   User goog
   Port 2222
   ProxyCommand ssh -q pluto nc saturn 22
-  HostKeyAlgorithms ssh-dss
+  HostKeyAlgorithms ssh-dss,ssh-rsa
   # comment
   IdentityOnly yes
   IdentityFile ~/.ssh/company
@@ -530,7 +627,7 @@ Host face
 			HostName:          "google.se",
 			User:              "goog",
 			Port:              2222,
-			HostKeyAlgorithms: "ssh-dss",
+			HostKeyAlgorithms: []string{"ssh-dss", "ssh-rsa"},
 			ProxyCommand:      "ssh -q pluto nc saturn 22",
 			IdentityFile:      "~/.ssh/company",
 			DynamicForwards: []DynamicForward{
@@ -541,13 +638,12 @@ Host face
 			},
 		},
 		{
-			Host:              []string{"face"},
-			User:              "mark",
-			Port:              22,
-			HostName:          "facebook.com",
-			HostKeyAlgorithms: "",
-			ProxyCommand:      "",
-			IdentityFile:      "",
+			Host:         []string{"face"},
+			User:         "mark",
+			Port:         22,
+			HostName:     "facebook.com",
+			ProxyCommand: "",
+			IdentityFile: "",
 			DynamicForwards: []DynamicForward{
 				{
 					Host: "",
@@ -577,11 +673,11 @@ func TestDynamicForward1(t *testing.T) {
 
 	var expected []*SSHHost
 
-	expectedErr := "Invalid dynamic forward: \"abc\""
+	expectedErr := "invalid dynamic forward: \"abc\""
 
 	actual, err := parse(config, "~/.ssh/config")
 	if err == nil || err.Error() != expectedErr {
-		t.Errorf("Did not get expected error: %#v, got %#v", expectedErr, err.Error())
+		t.Errorf("Did not get expected error: %#v, got %#v", expectedErr, err)
 	}
 
 	compare(t, expected, actual)
